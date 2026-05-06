@@ -17,6 +17,7 @@ from src.collectors.price import get_price_summary, fetch_and_cache
 from src.collectors.news import fetch_news, save_news
 from src.features.sentiment import get_ticker_sentiment, batch_sentiment
 from src.models.train import train_and_evaluate, save_model, save_params, predict_next_day, predict_with_sentiment
+from src.models.lstm import train_lstm_model, save_lstm, compare_models
 from src.backtest.engine import walk_forward_test
 
 
@@ -134,6 +135,34 @@ def cmd_sentiment(args):
             print(f"  {ticker}: ❌ {e}\n")
 
 
+def cmd_compare(args):
+    """Compare XGBoost vs LSTM models for a ticker."""
+    ticker = args.ticker.upper()
+    
+    print(f"\n{'='*60}")
+    print(f"🤖 MODEL COMPARISON: {ticker}")
+    print(f"{'='*60}\n")
+    
+    try:
+        result = compare_models(ticker)
+        
+        print(f"\n  {'─'*45}")
+        print(f"  {'Metric':<15} {'XGBoost':>12} {'LSTM/MLP':>12}")
+        print(f"  {'─'*45}")
+        print(f"  {'Accuracy':<15} {result['xgboost']['accuracy']:>11.1%} {result['lstm']['accuracy']:>11.1%}")
+        print(f"  {'F1 Score':<15} {result['xgboost']['f1']:>11.1%} {result['lstm']['f1']:>11.1%}")
+        print(f"  {'vs Baseline':<15} {result['xgboost']['improvement']:>+10.1%} {result['lstm']['improvement']:>+10.1%}")
+        print(f"  {'─'*45}")
+        print(f"  🏆 Winner: {result['winner']}")
+        
+        if result['winner'] == 'XGBoost':
+            print(f"  XGBoost is {result['xgboost']['accuracy'] - result['lstm']['accuracy']:.1%} better")
+        elif result['winner'] == 'LSTM/MLP':
+            print(f"  LSTM is {result['lstm']['accuracy'] - result['xgboost']['accuracy']:.1%} better")
+        
+    except Exception as e:
+        print(f"  ❌ Error: {e}")
+
 def cmd_backtest(args):
     """Run backtest for a ticker."""
     ticker = args.ticker.upper()
@@ -197,6 +226,10 @@ def main():
     back_parser = subparsers.add_parser('backtest', help='Backtest a ticker')
     back_parser.add_argument('ticker', help='Ticker to backtest')
     
+    # compare
+    cmp_parser = subparsers.add_parser('compare', help='Compare XGBoost vs LSTM')
+    cmp_parser.add_argument('ticker', help='Ticker to compare models for')
+    
     # dashboard
     subparsers.add_parser('dashboard', help='Launch Streamlit dashboard')
     
@@ -210,6 +243,8 @@ def main():
         cmd_train(args)
     elif args.command == 'backtest':
         cmd_backtest(args)
+    elif args.command == 'compare':
+        cmd_compare(args)
     elif args.command == 'dashboard':
         cmd_dashboard(args)
     else:
