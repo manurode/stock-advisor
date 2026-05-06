@@ -18,6 +18,7 @@ from src.collectors.news import fetch_news, save_news
 from src.features.sentiment import get_ticker_sentiment, batch_sentiment
 from src.models.train import train_and_evaluate, save_model, save_params, predict_next_day, predict_with_sentiment
 from src.models.lstm import train_lstm_model, save_lstm, compare_models
+from src.tracker import save_daily_predictions, evaluate_predictions, update_accuracy_log, print_tracker_report
 from src.backtest.engine import walk_forward_test
 
 
@@ -192,6 +193,30 @@ def cmd_backtest(args):
         print(f"  ❌ Backtest failed: {e}")
 
 
+def cmd_track(args):
+    """Track prediction accuracy: save today's predictions and/or evaluate past ones."""
+    if args.eval_date:
+        # Evaluate predictions from a specific date
+        print(f"Evaluating predictions from {args.eval_date}...")
+        result = update_accuracy_log(args.eval_date)
+        if 'error' in result:
+            print(f"  {result['error']}")
+        else:
+            print(f"  Accuracy: {result['accuracy']:.1%}")
+            print(f"  Log entries: {result['log_entries']}")
+    elif args.report:
+        # Show accuracy report
+        print_tracker_report()
+    else:
+        # Save today's predictions
+        print(f"Saving predictions for today ({datetime.now().strftime('%Y-%m-%d')})...")
+        tickers = args.tickers or DEFAULT_TICKERS
+        path = save_daily_predictions(tickers)
+        print(f"  ✅ Saved {len(tickers)} predictions to {path}")
+        print(f"  Run 'python -m src.cli track --report' to see accuracy.")
+        print(f"  Run 'python -m src.cli track --eval YYYY-MM-DD' to evaluate past predictions.")
+
+
 def cmd_dashboard(args):
     """Launch Streamlit dashboard."""
     import subprocess
@@ -233,6 +258,12 @@ def main():
     # dashboard
     subparsers.add_parser('dashboard', help='Launch Streamlit dashboard')
     
+    # track
+    track_parser = subparsers.add_parser('track', help='Save/evaluate daily predictions (paper trading)')
+    track_parser.add_argument('--tickers', nargs='*', help='Tickers to predict (default: all)')
+    track_parser.add_argument('--eval', dest='eval_date', help='Evaluate predictions from date YYYY-MM-DD')
+    track_parser.add_argument('--report', action='store_true', help='Show accuracy report')
+    
     args = parser.parse_args()
     
     if args.command == 'predict':
@@ -247,6 +278,8 @@ def main():
         cmd_compare(args)
     elif args.command == 'dashboard':
         cmd_dashboard(args)
+    elif args.command == 'track':
+        cmd_track(args)
     else:
         parser.print_help()
 
