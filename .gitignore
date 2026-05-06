@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+data/prices/
+data/news/
+predictions/
+.streamlit/
+*.egg-info/
+dist/
+build/
+models/*.pkl
+.DS_Store
