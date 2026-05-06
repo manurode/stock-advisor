@@ -70,10 +70,24 @@ Default watchlist (configurable in `src/config.py`):
 
 ## Model Performance
 
-Based on spike experiments (May 2026):
-- Technical-only model: ~50% accuracy (no better than baseline)
-- Sentiment pipeline: Working and differentiated across stocks
-- **Combined model**: Expected improvement (in production validation)
+Training results with 40 features (34 technical + 6 market sentiment) on 3 years of data:
+
+| Ticker | Accuracy | Baseline | Δ | F1 |
+|--------|----------|----------|---|----|
+| AAPL | 55.0% | 50.5% | +4.5% | 55.4% |
+| JPM | 54.1% | 52.3% | +1.8% | 51.4% |
+| NVDA | 48.6% | 52.3% | -3.6% | 46.7% |
+| AMZN | 46.8% | 56.8% | -9.9% | 40.4% |
+| MSFT | 45.9% | 52.3% | -6.3% | 58.3% |
+| META | 45.0% | 50.5% | -5.4% | 45.0% |
+| TSLA | 45.0% | 50.5% | -5.4% | 40.8% |
+| GOOGL | 43.2% | 50.5% | -7.2% | 47.1% |
+
+**Key findings:**
+- AAPL (+4.5%) and JPM (+1.8%) beat baseline — mature companies show more predictable patterns
+- High-growth tech (TSLA, NVDA, META) underperform — driven by narratives/news, not captured in training
+- The real edge comes from **news sentiment at prediction time** (VADER blending)
+- Use `python -m src.cli track` daily to accumulate accuracy data
 
 ## License
 
