@@ -16,22 +16,26 @@ from src.config import DEFAULT_TICKERS
 from src.collectors.price import get_price_summary, fetch_and_cache
 from src.collectors.news import fetch_news, save_news
 from src.features.sentiment import get_ticker_sentiment, batch_sentiment
-from src.models.train import train_and_evaluate, save_model, predict_next_day
+from src.models.train import train_and_evaluate, save_model, save_params, predict_next_day, predict_with_sentiment
 from src.backtest.engine import walk_forward_test
 
 
 def cmd_train(args):
     """Train models for specified tickers."""
     tickers = args.tickers or DEFAULT_TICKERS
+    do_tune = args.tune
     
     print(f"Training models for {len(tickers)} tickers...")
+    if do_tune:
+        print(f"🔧 Hyperparameter tuning ENABLED (n_iter={args.n_iter})")
     print("=" * 60)
     
     for ticker in tickers:
         try:
             print(f"\n📈 {ticker}:")
-            result = train_and_evaluate(ticker)
+            result = train_and_evaluate(ticker, tune=do_tune, n_iter=args.n_iter)
             save_model(result['model'], ticker)
+            save_params(result['params'], ticker)
             
             metrics = result['metrics']
             improvement = metrics['accuracy'] - metrics['baseline']
@@ -43,13 +47,16 @@ def cmd_train(args):
             print(f"   Features:  {result['n_features']}")
             print(f"   Data:      {result['train_days']} train / {result['test_days']} test days")
             
+            if result['tuning']:
+                print(f"   Tuned CV:  {result['tuning']['best_score']:.1%}")
+                print(f"   Best params: {result['tuning']['best_params']}")
+            
             if result['top_features']:
                 print(f"   Top feature: {result['top_features'][0]['feature']}")
         except Exception as e:
             print(f"   ❌ Error: {e}")
     
     print(f"\n✅ Training complete. Models saved to models/")
-    print(f"   Run 'python -m src.cli predict' to generate predictions.")
 
 
 def cmd_predict(args):
@@ -69,8 +76,8 @@ def cmd_predict(args):
             # Get sentiment
             sentiment = get_ticker_sentiment(ticker)
             
-            # Get ML prediction
-            ml_pred = predict_next_day(ticker)
+            # Get ML prediction with sentiment blending
+            ml_pred = predict_with_sentiment(ticker, sentiment=sentiment)
             
             row = {
                 'ticker': ticker,
@@ -183,6 +190,8 @@ def main():
     # train
     train_parser = subparsers.add_parser('train', help='Train models')
     train_parser.add_argument('--tickers', nargs='*', help='Tickers to train (default: all)')
+    train_parser.add_argument('--tune', action='store_true', help='Run hyperparameter tuning')
+    train_parser.add_argument('--n_iter', type=int, default=25, help='Tuning iterations (default: 25)')
     
     # backtest
     back_parser = subparsers.add_parser('backtest', help='Backtest a ticker')

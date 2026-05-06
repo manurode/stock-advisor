@@ -1,10 +1,11 @@
 """Model training and prediction using XGBoost with sentiment features."""
 import pickle
+import json
 import pandas as pd
 import numpy as np
 import xgboost as xgb
 from pathlib import Path
-from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
+from sklearn.model_selection import TimeSeriesSplit, GridSearchCV, RandomizedSearchCV
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
 from src.config import (
@@ -18,21 +19,14 @@ from src.features.technical import compute_all_features
 # ─── Market Sentiment Features (available historically) ───
 
 def _add_market_features(features: pd.DataFrame, ticker: str) -> pd.DataFrame:
-    """Add market-wide sentiment proxy features (VIX, SPY) to the feature set.
-    
-    These are available historically, unlike ticker-specific news sentiment.
-    VIX inversely correlates with market sentiment (fear index).
-    SPY returns represent broad market direction.
-    """
+    """Add market-wide sentiment proxy features (VIX, SPY) to the feature set."""
     try:
-        # Fetch VIX (fear index) and SPY (market benchmark)
         vix = fetch_prices("^VIX", period="3y")
         spy = fetch_prices("SPY", period="3y")
         
         if vix.empty or spy.empty:
             return features
         
-        # Normalize timezones: strip tz and align by date
         def _normalize_index(df: pd.DataFrame) -> pd.DataFrame:
             df = df.copy()
             df.index = pd.to_datetime(df.index).tz_localize(None).normalize()
@@ -41,33 +35,25 @@ def _add_market_features(features: pd.DataFrame, ticker: str) -> pd.DataFrame:
         vix = _normalize_index(vix)
         spy = _normalize_index(spy)
         
-        # Create a date-only index for features too
         date_index = pd.to_datetime(features.index).tz_localize(None).normalize()
         
-        # VIX features
         vix_returns = vix['Close'].pct_change()
         vix_change_5d = vix['Close'].pct_change(5)
-        
-        # SPY features
         spy_returns = spy['Close'].pct_change()
         spy_change_5d = spy['Close'].pct_change(5)
         
-        # Align using date-only index
         features['market_vix_return'] = vix_returns.reindex(date_index).values
         features['market_vix_5d'] = vix_change_5d.reindex(date_index).values
         features['market_spy_return'] = spy_returns.reindex(date_index).values
         features['market_spy_5d'] = spy_change_5d.reindex(date_index).values
         
-        # VIX level (normalized): high VIX = fear, low VIX = greed
         vix_level = vix['Close'].reindex(date_index)
         features['market_vix_level'] = (vix_level.values / vix_level.rolling(50).mean().values) - 1
         
-        # Market breadth proxy: how many of last 5 days were up for SPY
         spy_up = (spy_returns > 0).astype(int)
         features['market_breadth_5d'] = spy_up.rolling(5).sum().reindex(date_index).values / 5
         
     except Exception:
-        # If market data unavailable, skip these features
         pass
     
     return features
@@ -80,20 +66,10 @@ def prepare_dataset(
     period: str = "3y",
     include_market: bool = True,
 ) -> tuple[pd.DataFrame, pd.Series]:
-    """Fetch price data and engineer features for a ticker.
-    
-    Args:
-        ticker: Stock symbol
-        period: yfinance period string
-        include_market: Add VIX/SPY market sentiment features
-    
-    Returns:
-        X (features DataFrame), y (target Series)
-    """
+    """Fetch price data and engineer features for a ticker."""
     df = fetch_prices(ticker, period)
     features = compute_all_features(df)
     
-    # Add market-level sentiment proxies (VIX, SPY)
     if include_market:
         features = _add_market_features(features, ticker)
     
@@ -146,8 +122,78 @@ def evaluate_model(
     }
 
 
-def train_and_evaluate(ticker: str, period: str = "3y") -> dict:
-    """Full training pipeline: fetch, train/test split, train, evaluate."""
+# ─── Hyperparameter Tuning ───
+
+def tune_hyperparameters(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    n_iter: int = 25,
+) -> dict:
+    """Optimize XGBoost hyperparameters using RandomizedSearchCV with TimeSeriesSplit.
+    
+    Args:
+        X_train: Training features
+        y_train: Training targets
+        n_iter: Number of parameter combinations to try
+    
+    Returns:
+        dict with best_params, best_score, and search details
+    """
+    param_dist = {
+        'n_estimators': [100, 200, 300, 500],
+        'max_depth': [3, 4, 5, 6, 7],
+        'learning_rate': [0.01, 0.03, 0.05, 0.1],
+        'subsample': [0.7, 0.8, 0.9, 1.0],
+        'colsample_bytree': [0.7, 0.8, 0.9, 1.0],
+        'min_child_weight': [1, 3, 5, 7],
+        'gamma': [0, 0.1, 0.3, 0.5],
+        'reg_alpha': [0, 0.1, 1.0],
+        'reg_lambda': [1.0, 2.0, 5.0],
+    }
+    
+    tscv = TimeSeriesSplit(n_splits=3)
+    
+    base_model = xgb.XGBClassifier(
+        objective='binary:logistic',
+        eval_metric='logloss',
+        random_state=42,
+        verbosity=0,
+    )
+    
+    search = RandomizedSearchCV(
+        base_model,
+        param_distributions=param_dist,
+        n_iter=n_iter,
+        cv=tscv,
+        scoring='accuracy',
+        random_state=42,
+        verbose=0,
+        n_jobs=1,
+    )
+    
+    search.fit(X_train, y_train)
+    
+    return {
+        'best_params': search.best_params_,
+        'best_score': float(search.best_score_),
+        'n_iter': n_iter,
+    }
+
+
+def train_and_evaluate(
+    ticker: str,
+    period: str = "3y",
+    tune: bool = False,
+    n_iter: int = 25,
+) -> dict:
+    """Full training pipeline: fetch, train/test split, train, evaluate.
+    
+    Args:
+        ticker: Stock symbol
+        period: Data period
+        tune: If True, run hyperparameter tuning before final training
+        n_iter: Number of tuning iterations (only if tune=True)
+    """
     X, y = prepare_dataset(ticker, period)
     
     # Time-respecting train/test split
@@ -155,7 +201,15 @@ def train_and_evaluate(ticker: str, period: str = "3y") -> dict:
     X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
     y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
     
-    model = train_model(X_train, y_train)
+    # Optional hyperparameter tuning
+    tuning_result = None
+    if tune:
+        tuning_result = tune_hyperparameters(X_train, y_train, n_iter=n_iter)
+        params = tuning_result['best_params']
+    else:
+        params = DEFAULT_MODEL_PARAMS.copy()
+    
+    model = train_model(X_train, y_train, params)
     metrics = evaluate_model(model, X_test, y_test)
     
     # Feature importance
@@ -173,6 +227,8 @@ def train_and_evaluate(ticker: str, period: str = "3y") -> dict:
         'train_days': len(X_train),
         'test_days': len(X_test),
         'top_features': importance.head(10).to_dict('records'),
+        'params': params,
+        'tuning': tuning_result,
     }
 
 
@@ -186,6 +242,13 @@ def save_model(model: xgb.XGBClassifier, ticker: str) -> Path:
     return path
 
 
+def save_params(params: dict, ticker: str) -> Path:
+    """Save best hyperparameters to JSON."""
+    path = MODELS_DIR / f"{ticker}_params.json"
+    path.write_text(json.dumps(params, indent=2))
+    return path
+
+
 def load_model(ticker: str) -> xgb.XGBClassifier | None:
     """Load a trained model from disk."""
     path = MODELS_DIR / f"{ticker}.pkl"
@@ -195,27 +258,22 @@ def load_model(ticker: str) -> xgb.XGBClassifier | None:
         return pickle.load(f)
 
 
-# ─── Prediction (Technical Only) ───
+def load_params(ticker: str) -> dict | None:
+    """Load saved hyperparameters."""
+    path = MODELS_DIR / f"{ticker}_params.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text())
 
-def predict_next_day(
-    ticker: str,
-    model: xgb.XGBClassifier | None = None,
-) -> dict:
-    """Predict next-day direction using technical features only."""
-    if model is None:
-        model = load_model(ticker)
-    
-    if model is None:
-        return {'ticker': ticker, 'error': 'No trained model found'}
-    
-    # Get fresh data and compute features
+
+# ─── Prediction ───
+
+def _get_latest_features(ticker: str) -> pd.DataFrame:
+    """Get feature vector for the most recent trading day."""
     df = fetch_prices(ticker, period="6mo")
     features = compute_all_features(df)
-    
-    # Add market features for latest day
     features = _add_market_features(features, ticker)
     
-    # Get last few rows so we can forward-fill any gaps
     latest_rows = features.drop('target', axis=1).iloc[-5:]
     latest_rows = latest_rows.ffill().bfill()
     latest = latest_rows.iloc[-1:]
@@ -223,10 +281,25 @@ def predict_next_day(
     if latest.isna().any().any():
         latest = latest.fillna(0)
     
+    return latest
+
+
+def predict_next_day(
+    ticker: str,
+    model: xgb.XGBClassifier | None = None,
+) -> dict:
+    """Predict next-day direction using technical + market features."""
+    if model is None:
+        model = load_model(ticker)
+    
+    if model is None:
+        return {'ticker': ticker, 'error': 'No trained model found'}
+    
+    latest = _get_latest_features(ticker)
+    
     # Align features with model's expected columns
     expected_cols = model.get_booster().feature_names
     if set(expected_cols) != set(latest.columns):
-        # Model trained with different features; use common subset
         common = [c for c in expected_cols if c in latest.columns]
         if len(common) < len(expected_cols) * 0.5:
             return {'ticker': ticker, 'error': 'Feature mismatch — retrain model'}
@@ -243,8 +316,6 @@ def predict_next_day(
         'prob_down': round(float(probabilities[0]), 4),
     }
 
-
-# ─── Combined Prediction (Technical + Sentiment) ───
 
 def predict_with_sentiment(
     ticker: str,
@@ -263,9 +334,6 @@ def predict_with_sentiment(
         model: Pre-trained XGBoost model
         sentiment: Sentiment dict from features.sentiment.get_ticker_sentiment()
         sentiment_weight: How much weight to give sentiment (0-1)
-    
-    Returns:
-        dict with combined prediction, component scores, and metadata
     """
     # Get base ML prediction
     ml_result = predict_next_day(ticker, model)
@@ -282,17 +350,9 @@ def predict_with_sentiment(
             sentiment = {'compound': 0.0, 'label': 'NO_DATA', 'article_count': 0}
     
     compound = sentiment.get('compound', 0.0)
-    
-    # Blend: adjust ML probability with sentiment signal
-    # Sentiment pulls probability up (bullish) or down (bearish)
     ml_prob_up = ml_result['prob_up']
-    
-    # Normalize compound to a scaling factor (-1 to +1 maps to adjustment)
     sentiment_adjustment = compound * sentiment_weight
-    
-    # Adjusted probability (clamped to [0, 1])
-    combined_prob_up = ml_prob_up + sentiment_adjustment
-    combined_prob_up = max(0.0, min(1.0, combined_prob_up))
+    combined_prob_up = max(0.0, min(1.0, ml_prob_up + sentiment_adjustment))
     
     # Final prediction
     if combined_prob_up >= 0.50:
@@ -300,7 +360,6 @@ def predict_with_sentiment(
     elif combined_prob_up <= 0.45:
         combined_prediction = 'DOWN'
     else:
-        # Too close to call — trust the ML model
         combined_prediction = ml_result['prediction']
     
     # Determine signal agreement
@@ -320,7 +379,6 @@ def predict_with_sentiment(
         'confidence': round(max(combined_prob_up, 1 - combined_prob_up), 4),
         'prob_up': round(combined_prob_up, 4),
         'prob_down': round(1 - combined_prob_up, 4),
-        # Component details
         'ml_prediction': ml_result['prediction'],
         'ml_prob_up': ml_result['prob_up'],
         'sentiment_label': sentiment.get('label', 'N/A'),
